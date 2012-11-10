@@ -1,0 +1,333 @@
+#!/usr/bin/env python
+#from pylab import *
+from sys import *
+from math import *
+from numpy import *
+from matplotlib.pyplot import *
+from matplotlib.path import *
+from matplotlib.patches import *
+from matplotlib.image import *
+from scipy.interpolate import CloughTocher2DInterpolator
+###############################################################################
+def savitzky_golay(y, window_size, order, deriv=0, rate=1):
+    import numpy as np
+    from math import factorial
+
+    try:
+        window_size = np.abs(np.int(window_size))
+        order = np.abs(np.int(order))
+    except ValueError, msg:
+        raise ValueError("window_size and order have to be of type int")
+    if window_size % 2 != 1 or window_size < 1:
+        raise TypeError("window_size size must be a positive odd number")
+    if window_size < order + 2:
+        raise TypeError("window_size is too small for the polynomials order")
+    order_range = range(order+1)
+    half_window = (window_size -1) // 2
+    # precompute coefficients
+    b = np.mat([[k**i for i in order_range] for k in range(-half_window, half_window+1)])
+    m = np.linalg.pinv(b).A[deriv] * rate**deriv * factorial(deriv)
+    # pad the signal at the extremes with
+    # values taken from the signal itself
+    firstvals = y[0] - np.abs( y[1:half_window+1][::-1] - y[0] )
+    lastvals = y[-1] + np.abs(y[-half_window-1:-1][::-1] - y[-1])
+    y = np.concatenate((firstvals, y, lastvals))
+    return np.convolve( m[::-1], y, mode='valid')
+###############################################################################
+def smooth_track(track):
+	lt = []
+	lx = []
+	ly = []
+	for particle in track:
+		lt.append(particle[5])
+		lx.append(particle[0])
+		ly.append(particle[1])
+	t = array(lt)
+	x = array(lx)
+	y = array(ly)
+	if len(t) > 21:
+		win = 21
+	else:
+		win = len(t) - 4
+		if win%2==0:
+			win = win -1
+	xsg = savitzky_golay(x, window_size=win, order=3)
+	ysg = savitzky_golay(y, window_size=win, order=3)
+
+	for i in range(len(track)):
+		track[i] = (xsg[i], ysg[i], track[i][2], track[i][3], track[i][4],
+				track[i][5])
+###############################################################################
+def read_tracks(filename):
+	file = open(filename)
+	file.readline() # bypass header
+
+	tracks = []
+	track = []
+	track_id_old = -1
+	for line in file:
+		data = line.split()
+		track_id = int(data[0])
+		time = float(data[1])
+		x = float(data[2])
+		y = float(data[3])
+		w = float(data[4])
+		h = float(data[5])
+		angle = float(data[6])
+		if track_id != track_id_old and track_id_old > 0:
+			tracks.append(track)
+			track = []
+		track_id_old = track_id
+		track.append((x,y, w,h, angle, time))
+	tracks.append(track)
+
+	coord_list = []
+	velx_list = []
+	vely_list = []
+	for track in tracks:
+		smooth_track(track)
+		t  = []
+		lx = []
+		ly = []
+		for particle in track:
+			lx.append(particle[0])
+			ly.append(particle[1])
+			t.append(particle[5])
+		dx = []
+		dy = []
+		for i in range(len(track)-1):
+			dx.append(lx[i+1] - lx[i])
+			dy.append(ly[i+1] - ly[i])
+			velx_list.append(lx[i+1] - lx[i])
+			vely_list.append(ly[i+1] - ly[i])
+			coord_list.append( ((lx[i+1] + lx[i])/2.0, (ly[i+1] + ly[i])/2.0) )
+
+		import matplotlib.pyplot as plt
+		if len(dx)>300:
+			plt.plot(t[:-1], dx, label='Noisy signal X')
+			plt.plot(t[:-1], dy, label='Noisy signal Y')
+			plt.legend()
+			plt.show()
+
+	coord = array(coord_list) / 2.47 * 1e-6
+	velx = array(velx_list) / 2.47 * 1e-6 / 0.044
+	vely = array(vely_list) / 2.47 * 1e-6 / 0.044
+
+	return coord, velx, vely
+###############################################################################
+def read_tracks_old(filename):
+	''' Read mobility data from file.
+	'''
+	vel_file = open(filename)
+	vel_file.readline() #bypass the header
+	coord_list=[]
+	vel_list=[]
+	for line in vel_file:
+		words = line.split()
+		coord_list.append( (float(words[1]), float(words[2])))
+		vel_list.append( (float(words[3]), float(words[4])))
+	size = len(vel_list)
+	coord = empty([size,2])
+	velx = empty([size])
+	vely = empty([size])
+	for i in range(size):
+		coord[i,0] = coord_list[i][0]
+		coord[i,1] = coord_list[i][1]
+		velx[i] = vel_list[i][0]
+		vely[i] = vel_list[i][1]
+	print coord, velx, vely
+	return coord, velx, vely
+###############################################################################
+def remove_corner(x, y, z):
+	for i in range(len(z)):
+		for j in range(len(z)):
+			if x[i,j] < -122.5e-6 and y[i,j] < -116e-6:
+				z[i,j] = 0
+			if x[i,j] < -122.5e-6 and y[i,j] >  116e-6:
+				z[i,j] = 0
+			if x[i,j] >  122.5e-6 and y[i,j] < -116e-6:
+				z[i,j] = 0
+			if x[i,j] >  122.5e-6 and y[i,j] >  116e-6:
+				z[i,j] = 0
+###############################################################################
+def remove_error(x, y, z, coord):
+	from kdtree import KDTree
+
+	thre = 2e-10
+	thre2 = 4e-5
+	list_coord = list(coord)
+	tuple_coord = []
+	for elem in list_coord:
+		tuple_coord.append(tuple(elem))
+	tree = KDTree.construct_from_data(tuple_coord)
+	for i in range(len(z)):
+		for j in range(len(z)):
+			xx = x[i,j]
+			yy = y[i,j]
+			nearest = tree.query(query_point = (xx, yy), t=1)
+			if sum((array(nearest[0]) - [xx, yy])**2) > thre:
+				z[i,j] = nan
+#			for xy in list_coord:
+#				vec = xy - [xx,yy]
+#				if vec[0]<thre2 and vec[1]< thre2:
+#					break
+#			z[i,j] = nan
+#			vec = coord - array([xx,yy])
+#			list_coord = list(vec**2)
+#			dist = []
+#			for k in list_coord:
+#				dist.append(sum(k))
+#			if min(dist) > thre:
+#				z[i,j] = nan
+		print i, j
+###############################################################################
+def flat(z, maxthre, minthre):
+	for i in range(len(z)):
+		for j in range(len(z)):
+			if z[i, j] < minthre:
+				z[i, j] = minthre
+			elif z[i, j] > maxthre:
+#				print i, j, z[i, j]
+				z[i, j] = maxthre
+###############################################################################
+def get_grid(interpolator, n, grid_type, coord):
+	#x, y = mgrid[-1e-3:1e-3:n*1j, -1e-3:1e-3:n*1j]
+	x, y = mgrid[0:5e-4:n*1j, 0:5e-4:n*1j]
+	z = interpolator(x, y)
+	remove_error(x, y, z, coord)
+	if grid_type is 'velocity':
+		flat(z, float(argv[4]), float(argv[3]))
+		pass
+	elif grid_type is 'ef':
+		remove_corner(x, y, z)
+	return x, y, z
+###############################################################################
+def in_zone(point):
+	''' Check if a point is in the interest zone.
+	'''
+	if point[0] >= -1e-3 and point[0] <= 1e-3 \
+			and point[1] >= -1e-3 and point[1] <= 1e-3:
+		return True
+	else:
+		return False
+###############################################################################
+def derive(interpx, interpy, point, delta):
+	ex = interpx(point[0], point[1]) * delta
+	ey = interpy(point[0], point[1]) * delta
+	return (point[0] - ex, point[1] - ey)
+###############################################################################
+def draw_efline(interpx, interpy, ax, startx, starty, delta):
+	''' Draw a electric field line start from (startx, starty).
+	'''
+	codes = [Path.MOVETO]
+	verts = [(startx, starty)]
+	point = (startx, starty)
+	while in_zone(point):
+		point = derive(interpx, interpy, point, delta)
+		codes.append(Path.LINETO)
+		verts.append(point)
+	print len(codes)
+	path = Path(verts, codes)
+	patch = PathPatch(path, facecolor='none')
+	ax.add_patch(patch)
+###############################################################################
+def draw_eflines(interpx, interpy, n, delta):
+	''' Draw a series of electric field lines.
+	'''
+	xs = linspace(-123e-6, 123e-6, n, endpoint = True)
+	for i in range(n):
+		draw_efline(interpx, interpy, ax, xs[i], 1e-3, delta)
+###############################################################################
+def draw_contour(x, y, z):
+	#contour(x, y, z, 10, linewidths=0.5, colors='k')
+	contourf(x, y, z, 100, cmap=cm.jet)
+	colorbar()
+#	scatter(coord[:,0], coord[:,1], marker='o', s=0.01)
+###############################################################################
+def show_plot(name):
+	ratio = 2.47e6
+	ix1 = 0 / ratio
+	ix2 = 1004 / ratio
+	iy2 = 1004 / ratio
+	iy1 = 0 / ratio
+	img = imread('spoo51.4l.tif-bg.png')
+	imgplot = imshow(img, origin='lower', alpha=0.8, extent=[ix1, ix2, iy1, iy2])
+	imgplot.set_cmap('gray')
+	xlim(ix1,ix2)
+	ylim(iy1,iy2)
+	savefig(name, dpi=300)
+	show()
+###############################################################################
+def get_ex(ef, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = ef[i,0]
+	return z
+###############################################################################
+def get_ey(ef, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = ef[i,1]
+	return z
+###############################################################################
+def get_ef(ef, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = sqrt(ef[i,0]**2 + ef[i,1]**2)
+	return z
+###############################################################################
+def get_mobix(mobi, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = mobi[i,0]
+	return z
+###############################################################################
+def get_mobiy(mobi, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = mobi[i,1]
+	return z
+###############################################################################
+def get_mobi(mobi, size):
+	z = empty([size])
+	for i in range(size):
+		z[i] = sqrt(mobi[i,0]**2 + mobi[i,1]**2)
+	return z
+###############################################################################
+def run_vel(coord_vel, velx, vely):
+	size_vel = len(coord_vel)
+	#print 'Getting electric field...'
+	#vel = get_vel(vel, size_vel)
+	print 'Creating interpolator...'
+	if argv[2] == 'x':
+		vel_interp = CloughTocher2DInterpolator(coord_vel, velx)
+	elif argv[2] == 'y':
+		vel_interp = CloughTocher2DInterpolator(coord_vel, vely)
+	elif argv[2] == 'v':
+		vel_interp = CloughTocher2DInterpolator(coord_vel, sqrt(velx**2+vely**2))
+	else:
+		exit(1)
+	#vel_interp = CloughTocher2DInterpolator(coord_vel, vel)
+	print 'Interpolating grid data...'
+	mx, my, mz = get_grid(vel_interp, 200, 'velocity', coord_vel)
+	hold(True)
+	print 'Drawing contour...'
+	draw_contour(mx, my, mz)
+	print 'Showing plot'
+	show_plot(argv[1]+'vel-'+argv[2]+'.png')
+###############################################################################
+def draw_track(coord_mobi):
+	size_mobi = len(coord_mobi)
+	scatter(coord_mobi[:,0], coord_mobi[:,1], marker='o', s=0.1)
+###############################################################################
+print 'Reading mobility data'
+coord_vel, velx, vely = read_tracks(argv[1])
+print 'Creating figure...'
+fig = figure()
+ax = fig.add_subplot(111)
+#print 'Reading electric field data...'
+#coord_ef, ef = read_ef()
+run_vel(coord_vel, velx, vely)
+#run_ef(coord_ef, ef)
+#hist(img.flatten())
+show()

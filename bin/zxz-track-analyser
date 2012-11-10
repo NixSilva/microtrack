@@ -1,0 +1,232 @@
+#!/usr/bin/env python
+from sys import *
+from math import *
+from numpy import *
+from matplotlib.pyplot import *
+from matplotlib.path import *
+from matplotlib.patches import *
+from matplotlib.image import *
+from scipy.interpolate import CloughTocher2DInterpolator
+###############################################################################
+def read_ef():
+    ''' Read electric field strength and position from files.
+    '''
+    ef_file = open('ef.txt')
+    geo_file = open('geo.txt')
+    index = []
+    ef_list=[]
+    coord_list=[]
+    for efline in ef_file:
+        new_index = int(efline.split()[0])
+
+        index.append(new_index)
+        ef_list.append( (float(efline.split()[1]),float(efline.split()[2])) )
+        while True:
+            geoline = geo_file.readline()
+            if float(geoline.split()[0]) == new_index:
+#                coord_list.append( (float(geoline.split()[1]),
+#                                    float(geoline.split()[2])) )
+                coord_list.append( (float(geoline.split()[2]),
+                                    float(geoline.split()[1])) )
+                break
+#    size = len(ef_list)
+#    coord = empty([size,2])
+#    ef = empty([size,2])
+#    for i in range(size):
+#        coord[i,0] = coord_list[i][0]
+#        coord[i,1] = coord_list[i][1]
+#        ef[i,0] = ef_list[i][0]
+#        ef[i,1] = ef_list[i][1]
+    coord = array(coord_list)
+    ef = array(ef_list)
+    return coord, ef
+###############################################################################
+def savitzky_golay(y, window_size, order, deriv=0, rate=1):
+    import numpy as np
+    from math import factorial
+
+    try:
+        window_size = np.abs(np.int(window_size))
+        order = np.abs(np.int(order))
+    except ValueError, msg:
+        raise ValueError("window_size and order have to be of type int")
+    if window_size % 2 != 1 or window_size < 1:
+        raise TypeError("window_size size must be a positive odd number")
+    if window_size < order + 2:
+        raise TypeError("window_size is too small for the polynomials order")
+    order_range = range(order+1)
+    half_window = (window_size -1) // 2
+    # precompute coefficients
+    b = np.mat([[k**i for i in order_range] for k in range(-half_window, half_window+1)])
+    m = np.linalg.pinv(b).A[deriv] * rate**deriv * factorial(deriv)
+    # pad the signal at the extremes with
+    # values taken from the signal itself
+    firstvals = y[0] - np.abs( y[1:half_window+1][::-1] - y[0] )
+    lastvals = y[-1] + np.abs(y[-half_window-1:-1][::-1] - y[-1])
+    y = np.concatenate((firstvals, y, lastvals))
+    return np.convolve( m[::-1], y, mode='valid')
+###############################################################################
+def smooth_track(track):
+    lt = []
+    lx = []
+    ly = []
+    for particle in track:
+        lt.append(particle[5])
+        lx.append(particle[0])
+        ly.append(particle[1])
+    t = array(lt)
+    x = array(lx)
+    y = array(ly)
+    if len(t) > 51:
+        win = 51
+    else:
+        win = len(t) - 4
+        if win%2==0:
+            win = win - 1
+    xsg = savitzky_golay(x, window_size=win, order=3)
+    ysg = savitzky_golay(y, window_size=win, order=3)
+
+    for i in range(len(track)):
+        track[i] = (xsg[i], ysg[i], track[i][0], track[i][1], track[i][2], 
+                track[i][3], track[i][4], track[i][5], track[i][6], track[i][7])
+###############################################################################
+def read_tracks(filename, ex_interp, ey_interp):
+    file = open(filename)
+    file.readline() # bypass header
+
+    x0 = 536.0
+    y0 = 565.0
+
+    tracks = []
+    track = []
+    last_track_id = -1
+    for line in file:
+        data = line.split()
+        track_id = int(data[0])
+        time = float(data[1]) * 0.044
+        x = (float(data[2]) - x0)/ 2.47 * 1e-6
+        y = (float(data[3]) - y0)/ 2.47 * 1e-6
+        w = float(data[4]) / 2.47 * 1e-6
+        h = float(data[5]) / 2.47 * 1e-6
+        ey = ey_interp(x, y)
+        ex = ex_interp(x, y)
+        angle = float(data[6])
+        if track_id != last_track_id and last_track_id > 0:
+            if len(track) > 100:
+                tracks.append(track)
+            track = []
+        last_track_id = track_id
+        track.append((x,y, w,h, angle, time, ex, ey))
+    if len(track) > 100:
+        tracks.append(track)
+
+    import matplotlib.pyplot as plt
+    f, ax = plt.subplots(4)
+    #f.subplots_adjust(hspace=0)
+    #plt.setp([a.get_xticklabels() for a in f.axes[:-1]], visible=False)
+    for track in tracks:
+        smooth_track(track)
+        t  = []
+        lx = []
+        ly = []
+        lsx = []
+        lsy = []
+        ex = []
+        ey = []
+        for particle in track:
+            lx.append(particle[0])
+            ly.append(particle[1])
+            lsx.append(particle[2])
+            lsy.append(particle[3])
+            t.append(particle[7])
+            ex.append(particle[8])
+            ey.append(particle[9])
+        dx = []
+        dy = []
+        dsx = []
+        dsy = []
+        for i in range(len(track)-1):
+            dx.append(lx[i+1] - lx[i])
+            dy.append(ly[i+1] - ly[i])
+            dsx.append(lsx[i+1] - lsx[i])
+            dsy.append(lsy[i+1] - lsy[i])
+
+        t  = t[:-1]
+        vx = array(dx) / 0.044
+        vy = array(dy) / 0.044
+        ex = array(ex[:-1])
+        ey = array(ey[:-1])
+        #evx = ex * vx / sqrt(vx * vx + vy * vy)
+        #evy = ey * vy / sqrt(vx * vx + vy * vy)
+        mx = vx / ex
+        my = vy / ex
+        #mvx = vx / evx
+        #mvy = vy / evy
+
+        trimn = 20
+        if len(dx)>100 and len(dx)<200:
+            ax[0].plot(lx[:-trimn], ly[:-trimn])
+            #ax[1].plot(lx[:-trimn], evx[:-trimn+1])
+            ax[1].plot(lx[:-trimn], vx[:-trimn+1])
+            #plt.ylim(0.6e-8,2.2e-8)
+            #ax[0].plot(lx[:-trimn], mvx[:-trimn+1])
+            ax[2].plot(lx[:-trimn], mx[:-trimn+1])
+            #ax[0].plot(evx, mvx)
+            ax[3].plot(vx[:-trimn], ex[:-trimn])
+            #plt.ylim(0.8e-8,1.5e-8)
+            #ax[4].plot(evx, mvx)
+    plt.show()
+###############################################################################
+def get_ex(ef, size):                                                           
+    z = empty([size])                                                           
+    for i in range(size):                                                       
+        z[i] = ef[i,0]                                                          
+    return z                                                                    
+############################################################################### 
+def get_ey(ef, size):                                                           
+    z = empty([size])                                                           
+    for i in range(size):                                                       
+        z[i] = ef[i,1]                                                          
+    return z                        
+############################################################################### 
+def run_ef(coord_ef, ef):
+    size_ef = len(coord_ef)
+    print 'Getting electric field...'
+    ex = get_ex(ef, size_ef)
+    ey = get_ey(ef, size_ef)
+    print 'Creating interpolator...'
+    ex_interp = CloughTocher2DInterpolator(coord_ef, ex)
+    ey_interp = CloughTocher2DInterpolator(coord_ef, ey)
+    return ex_interp, ey_interp
+###############################################################################
+def remove_corner(x, y, z):
+	for i in range(len(z)):
+		for j in range(len(z)):
+			if x[i,j] < -122.5e-6 and y[i,j] < -116e-6:
+				z[i,j] = 0
+			if x[i,j] < -122.5e-6 and y[i,j] >  116e-6:
+				z[i,j] = 0
+			if x[i,j] >  122.5e-6 and y[i,j] < -116e-6:
+				z[i,j] = 0
+			if x[i,j] >  122.5e-6 and y[i,j] >  116e-6:
+				z[i,j] = 0
+###############################################################################
+def get_grid(interpolator, n, grid_type):
+	x, y = mgrid[-1e-3:1e-3:n*1j, -1e-3:1e-3:n*1j]
+	z = interpolator(x, y)
+	remove_corner(x, y, z)
+	return x, y, z
+###############################################################################
+def draw_contour(x, y, z):
+	#contour(x, y, z, 10, linewidths=0.5, colors='k')
+	contourf(x, y, z, 500, cmap=cm.jet)
+	colorbar()
+#	scatter(coord[:,0], coord[:,1], marker='o', s=0.01)
+###############################################################################
+
+efcoord, ef= read_ef()
+ey, ex = run_ef(efcoord, ef)
+#print 'Interpolating grid data...'
+#gx, gy, gz = get_grid(ex, 600, 'ef')
+#draw_contour(gx, gy, gz)
+read_tracks(argv[1], ex, ey)
